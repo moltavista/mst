@@ -1,0 +1,75 @@
+name: Sync verified mst build
+
+on:
+  schedule:
+    - cron: "13 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: mst-release-sync
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download and verify the production build
+        id: build
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          base=https://mstep.moltavista.com/download/mst
+          version="$(curl -fsSL --retry 3 "$base/VERSION")"
+          [[ "$version" =~ ^mst-[a-zA-Z0-9._-]{1,96}$ ]] || {
+            echo "Unexpected mst version" >&2
+            exit 1
+          }
+          names=(mst-darwin-amd64 mst-darwin-arm64 mst-linux-amd64 mst-linux-arm64)
+          if current="$(gh release view latest --json body,assets 2>/dev/null)" &&
+            jq -e --arg version "$version" '
+              (.body | startswith("Build: " + $version + "\n")) and
+              (([.assets[].name] | sort) ==
+               (["SHA256SUMS", "VERSION", "mst-darwin-amd64", "mst-darwin-arm64", "mst-linux-amd64", "mst-linux-arm64"] | sort))
+            ' <<< "$current" >/dev/null; then
+            echo "Production build $version is already published"
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          mkdir -p dist
+          printf '%s\n' "$version" > dist/VERSION
+          curl -fsSL --retry 3 "$base/SHA256SUMS" -o dist/SHA256SUMS
+          for name in "${names[@]}"; do
+            curl -fsSL --retry 3 "$base/$name" -o "dist/$name"
+          done
+          (cd dist && sha256sum -c SHA256SUMS)
+          [ "$(curl -fsSL --retry 3 "$base/VERSION")" = "$version" ] || {
+            echo "Production changed during download; next run will retry" >&2
+            exit 1
+          }
+          echo "changed=true" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Publish the rolling release
+        if: steps.build.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.build.outputs.version }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          printf 'Build: %s\n\nInstall: curl -fsSL https://mstep.moltavista.com/install.sh | sh\n' "$VERSION" > notes.md
+          if gh release view latest >/dev/null 2>&1; then
+            gh release upload latest dist/mst-* --clobber
+            gh release upload latest dist/SHA256SUMS dist/VERSION --clobber
+            gh release edit latest --notes-file notes.md
+          else
+            gh release create latest dist/* --target main --title 'mst CLI (latest)' --notes-file notes.md --draft
+            gh release edit latest --draft=false --latest
+          fi
