@@ -25,7 +25,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          base=https://mstep.moltavista.com/download/mst
+          base=https://fab.moltavista.com/download/mst
           version="$(curl -fsSL --retry 3 "$base/VERSION")"
           [[ "$version" =~ ^mst-[a-zA-Z0-9._-]{1,96}$ ]] || {
             echo "Unexpected mst version" >&2
@@ -48,7 +48,15 @@ jobs:
           for name in "${names[@]}"; do
             curl -fsSL --retry 3 "$base/$name" -o "dist/$name"
           done
-          (cd dist && sha256sum -c SHA256SUMS)
+          # The server's list also covers files this release doesn't mirror. Keep
+          # exactly the mst binaries, all of them: a missing one must fail.
+          grep -E '^[0-9a-f]{64} [ *]mst-(darwin|linux)-(amd64|arm64)$' dist/SHA256SUMS > dist/SHA256SUMS.mst
+          mv dist/SHA256SUMS.mst dist/SHA256SUMS
+          [ "$(wc -l < dist/SHA256SUMS)" -eq "${#names[@]}" ] || {
+            echo "Unexpected SHA256SUMS" >&2
+            exit 1
+          }
+          (cd dist && sha256sum -c --strict SHA256SUMS)
           [ "$(curl -fsSL --retry 3 "$base/VERSION")" = "$version" ] || {
             echo "Production changed during download; next run will retry" >&2
             exit 1
@@ -64,7 +72,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          printf 'Build: %s\n\nInstall: curl -fsSL https://mstep.moltavista.com/install.sh | sh\n' "$VERSION" > notes.md
+          printf 'Build: %s\n\nInstall: curl -fsSL https://fab.moltavista.com/install.sh | sh\n' "$VERSION" > notes.md
           if gh release view latest >/dev/null 2>&1; then
             gh release upload latest dist/mst-* --clobber
             gh release upload latest dist/SHA256SUMS dist/VERSION --clobber
